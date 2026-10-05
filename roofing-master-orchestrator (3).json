@@ -1,0 +1,379 @@
+{
+  "name": "Roofing Outreach - Master Orchestrator",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "n1-start",
+      "name": "Start Run (click here)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "content": "## HOW TO RUN THIS\n\n1. Fill your Sheet ID + tab name in every Google Sheets node (search 'YOUR_SHEET_ID_HERE')\n2. Fill your API keys in the HTTP Request nodes: Google Custom Search, OpenAI, Vapi (search 'YOUR_..._HERE')\n3. Set 'Search Engine ID' and 'Vapi Assistant/Phone Number ID'\n4. Click 'Start Run' to kick it off\n5. Leave this browser tab + n8n running. It will keep looping through leads, one call at a time, with a real 15-min gap after each call ends, until no eligible leads remain.\n6. To stop early: just cancel the execution from the n8n Executions tab.\n\nSHEET COLUMNS REQUIRED (exact headers):\nBusiness Name | Phone | City | State | Rating | Review Count | Website | Call Status | Last Called At | Follow Up Date | Outcome Summary | Transcript | Meeting Booked | Attempt Count\n\nCall Status values this workflow writes: Booked / Not Interested / Follow-Up Requested / No Answer / Do Not Call / Call Timeout\n\nCALLING HOURS: only dials a lead if it's currently 9AM-9PM in THAT LEAD'S OWN state/time zone (not yours, not one fixed US zone). If eligible leads exist but all are outside their calling window right now, the workflow pauses and rechecks every 30 minutes instead of stopping - so it self-resumes once someone's local morning arrives, no manual restart needed.",
+        "height": 540,
+        "width": 440
+      },
+      "id": "n1-note",
+      "name": "READ ME FIRST",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-260, 0]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "__rl": true, "value": "YOUR_SHEET_ID_HERE", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Leads", "mode": "name" },
+        "options": {}
+      },
+      "id": "n2-getleads",
+      "name": "Get All Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pick exactly ONE eligible lead per pass through this loop, respecting THAT LEAD'S\n// own local calling hours (9AM-9PM), based on their state.\n//\n// Priority 1: due follow-ups (Follow Up Date <= today, status was 'Follow-Up Requested')\n// Priority 2: brand-new leads (Call Status empty)\n// Excluded permanently: Booked, Not Interested, Do Not Call\n\nconst STATE_TZ = {\n  AL:'America/Chicago', AK:'America/Anchorage', AZ:'America/Phoenix', AR:'America/Chicago',\n  CA:'America/Los_Angeles', CO:'America/Denver', CT:'America/New_York', DE:'America/New_York',\n  FL:'America/New_York', GA:'America/New_York', HI:'Pacific/Honolulu', ID:'America/Denver',\n  IL:'America/Chicago', IN:'America/New_York', IA:'America/Chicago', KS:'America/Chicago',\n  KY:'America/New_York', LA:'America/Chicago', ME:'America/New_York', MD:'America/New_York',\n  MA:'America/New_York', MI:'America/New_York', MN:'America/Chicago', MS:'America/Chicago',\n  MO:'America/Chicago', MT:'America/Denver', NE:'America/Chicago', NV:'America/Los_Angeles',\n  NH:'America/New_York', NJ:'America/New_York', NM:'America/Denver', NY:'America/New_York',\n  NC:'America/New_York', ND:'America/Chicago', OH:'America/New_York', OK:'America/Chicago',\n  OR:'America/Los_Angeles', PA:'America/New_York', RI:'America/New_York', SC:'America/New_York',\n  SD:'America/Chicago', TN:'America/Chicago', TX:'America/Chicago', UT:'America/Denver',\n  VT:'America/New_York', VA:'America/New_York', WA:'America/Los_Angeles', WV:'America/New_York',\n  WI:'America/Chicago', WY:'America/Denver'\n};\n\nconst FULL_NAME_TO_ABBR = {\n  ALABAMA:'AL', ALASKA:'AK', ARIZONA:'AZ', ARKANSAS:'AR', CALIFORNIA:'CA', COLORADO:'CO',\n  CONNECTICUT:'CT', DELAWARE:'DE', FLORIDA:'FL', GEORGIA:'GA', HAWAII:'HI', IDAHO:'ID',\n  ILLINOIS:'IL', INDIANA:'IN', IOWA:'IA', KANSAS:'KS', KENTUCKY:'KY', LOUISIANA:'LA',\n  MAINE:'ME', MARYLAND:'MD', MASSACHUSETTS:'MA', MICHIGAN:'MI', MINNESOTA:'MN',\n  MISSISSIPPI:'MS', MISSOURI:'MO', MONTANA:'MT', NEBRASKA:'NE', NEVADA:'NV',\n  'NEW HAMPSHIRE':'NH', 'NEW JERSEY':'NJ', 'NEW MEXICO':'NM', 'NEW YORK':'NY',\n  'NORTH CAROLINA':'NC', 'NORTH DAKOTA':'ND', OHIO:'OH', OKLAHOMA:'OK', OREGON:'OR',\n  PENNSYLVANIA:'PA', 'RHODE ISLAND':'RI', 'SOUTH CAROLINA':'SC', 'SOUTH DAKOTA':'SD',\n  TENNESSEE:'TN', TEXAS:'TX', UTAH:'UT', VERMONT:'VT', VIRGINIA:'VA', WASHINGTON:'WA',\n  'WEST VIRGINIA':'WV', WISCONSIN:'WI', WYOMING:'WY'\n};\n\nfunction resolveAbbr(state) {\n  const clean = (state || '').trim().toUpperCase();\n  if (STATE_TZ[clean]) return clean;\n  if (FULL_NAME_TO_ABBR[clean]) return FULL_NAME_TO_ABBR[clean];\n  return clean;\n}\n\nfunction isWithinCallingHours(state) {\n  const abbr = resolveAbbr(state);\n  const tz = STATE_TZ[abbr] || 'America/New_York';\n  const localHour = parseInt(\n    new Date().toLocaleString('en-US', { timeZone: tz, hour: '2-digit', hour12: false }),\n    10\n  );\n  return localHour >= 9 && localHour < 21;\n}\n\nconst today = new Date();\ntoday.setHours(0,0,0,0);\n\nconst rows = items.map(i => i.json);\n\nconst dueFollowUps = rows.filter(r => {\n  if (r['Call Status'] !== 'Follow-Up Requested') return false;\n  if (!r['Follow Up Date']) return false;\n  const fu = new Date(r['Follow Up Date']);\n  return fu <= today;\n});\n\nconst freshLeads = rows.filter(r => !r['Call Status'] || r['Call Status'].trim() === '');\n\nconst candidates = [...dueFollowUps, ...freshLeads];\n\nconst inHoursLead = candidates.find(r => isWithinCallingHours(r['State']));\n\nif (inHoursLead) {\n  return [{ json: { status: 'hasLead', ...inHoursLead } }];\n}\n\nif (candidates.length > 0) {\n  return [{ json: { status: 'waitingForHours' } }];\n}\n\nreturn [{ json: { status: 'noneLeft' } }];"
+      },
+      "id": "n3-pick",
+      "name": "Pick Next Eligible Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.status }}", "rightValue": "hasLead", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "hasLead"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.status }}", "rightValue": "waitingForHours", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "waitingForHours"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.status }}", "rightValue": "noneLeft", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "noneLeft"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n4-switch",
+      "name": "Route: Lead / Outside Hours / Empty",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "content": "3 outputs from the Switch above:\n- hasLead -> goes on to place the call\n- waitingForHours -> eligible leads exist but it's outside 9AM-9PM in all of their local time zones right now; waits 30 min then rechecks (self-resumes, no restart needed)\n- noneLeft -> nothing eligible at all; workflow ends, re-run 'Start Run' once new leads exist",
+        "height": 160,
+        "width": 300
+      },
+      "id": "n4-note",
+      "name": "SWITCH NOTE",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [660, 520]
+    },
+    {
+      "parameters": { "amount": 30, "unit": "minutes" },
+      "id": "n4b-waithours",
+      "name": "Wait For Calling Hours (30 min)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {},
+      "id": "n4-noop",
+      "name": "No More Leads - Stop",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [880, 500]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "engine", "value": "google" },
+            { "name": "api_key", "value": "YOUR_SERPAPI_KEY_HERE" },
+            { "name": "q", "value": "=roofing company in {{ $json.City }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n5-competitor",
+      "name": "Search Competitor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Pick Next Eligible Lead').first().json;\nconst results = $input.first().json.organic_results || [];\nconst top = results[0] || {};\n\nreturn [{\n  json: {\n    ...lead,\n    competitor_name: top.title || 'a local competitor',\n    competitor_detail: top.snippet ? top.snippet.slice(0, 180) : 'ranks on the first page for local roofing searches'\n  }\n}];"
+      },
+      "id": "n6-extract",
+      "name": "Extract Competitor Info",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_OPENAI_API_KEY_HERE" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    {\"role\": \"system\", \"content\": \"You write a single tailored cold-call opening line for a web developer pitching a roofing company with no website. Reference their real rating, review count, and the named competitor. Output ONLY the opener sentence, no quotes, no preamble.\"},\n    {\"role\": \"user\", \"content\": \"Business: {{ $json['Business Name'] }}. City: {{ $json.City }}. Rating: {{ $json.Rating }}. Reviews: {{ $json['Review Count'] }}. Competitor: {{ $json.competitor_name }}. Competitor detail: {{ $json.competitor_detail }}\"}\n  ],\n  \"temperature\": 0.7\n}"
+      },
+      "id": "n7-script",
+      "name": "Generate Tailored Opener",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Extract Competitor Info').first().json;\nconst aiResponse = $input.first().json;\nconst opener = aiResponse.choices?.[0]?.message?.content?.trim() || 'Custom opener unavailable';\n\nreturn [{ json: { ...lead, opener } }];"
+      },
+      "id": "n8-merge",
+      "name": "Merge Opener Into Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.vapi.ai/call",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_VAPI_API_KEY_HERE" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"assistantId\": \"YOUR_VAPI_ASSISTANT_ID_HERE\",\n  \"phoneNumberId\": \"YOUR_VAPI_PHONE_NUMBER_ID_HERE\",\n  \"customer\": { \"number\": \"{{ $json.Phone }}\" },\n  \"assistantOverrides\": {\n    \"variableValues\": {\n      \"business_name\": \"{{ $json['Business Name'] }}\",\n      \"city\": \"{{ $json.City }}\",\n      \"rating\": \"{{ $json.Rating }}\",\n      \"review_count\": \"{{ $json['Review Count'] }}\",\n      \"competitor_name\": \"{{ $json.competitor_name }}\",\n      \"competitor_detail\": \"{{ $json.competitor_detail }}\",\n      \"opener\": \"{{ $json.opener }}\"\n    }\n  }\n}"
+      },
+      "id": "n9-placecall",
+      "name": "Place Call (Vapi)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Merge Opener Into Lead').first().json;\nconst call = $input.first().json;\n\nreturn [{ json: { ...lead, vapi_call_id: call.id, poll_count: 0 } }];"
+      },
+      "id": "n10-savecallid",
+      "name": "Save Call ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, 300]
+    },
+    {
+      "parameters": { "amount": 30, "unit": "seconds" },
+      "id": "n11-wait30",
+      "name": "Wait 30s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1980, 500]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.vapi.ai/call/{{ $json.vapi_call_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_VAPI_API_KEY_HERE" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n12-checkcall",
+      "name": "Check Call Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Save Call ID').first().json;\nconst call = $input.first().json;\nconst pollCount = (lead.poll_count || 0) + 1;\n\nreturn [{\n  json: {\n    ...lead,\n    call_status: call.status,\n    call_ended_reason: call.endedReason || null,\n    call_summary: call.summary || '',\n    call_transcript: call.transcript || '',\n    poll_count: pollCount,\n    timed_out: pollCount >= 20\n  }\n}];"
+      },
+      "id": "n13-mergecall",
+      "name": "Merge Call Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.call_status }}",
+              "rightValue": "ended",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "or"
+        }
+      },
+      "id": "n14-endedif",
+      "name": "Call Ended OR Timed Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2640, 500]
+    },
+    {
+      "parameters": {
+        "content": "This node's IF only checks status == 'ended'.\nAfter import, edit it to also branch true when {{ $json.timed_out }} is true (OR condition), so a stuck call after ~10 minutes of polling doesn't loop forever - it'll fall through as 'Call Timeout' instead.",
+        "height": 140,
+        "width": 280
+      },
+      "id": "n14-note",
+      "name": "IMPORTANT - EDIT THIS IF",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2640, 650]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_OPENAI_API_KEY_HERE" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"response_format\": {\"type\": \"json_object\"},\n  \"messages\": [\n    {\"role\": \"system\", \"content\": \"Classify a cold call outcome from its summary/transcript. Return strict JSON only: {\\\"outcome\\\": one of ['Booked','Not Interested','Follow-Up Requested','No Answer','Do Not Call'], \\\"follow_up_date\\\": 'YYYY-MM-DD or empty string', \\\"meeting_booked\\\": true or false, \\\"short_summary\\\": 'one sentence'}\"},\n    {\"role\": \"user\", \"content\": \"Ended reason: {{ $json.call_ended_reason }}. Summary: {{ $json.call_summary }}. Transcript: {{ $json.call_transcript }}\"}\n  ]\n}"
+      },
+      "id": "n15-classify",
+      "name": "Classify Outcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2860, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Merge Call Data').first().json;\nconst ai = $input.first().json;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(ai.choices?.[0]?.message?.content || '{}');\n} catch (e) {\n  parsed = {};\n}\n\nconst outcome = lead.timed_out && lead.call_status !== 'ended'\n  ? 'Call Timeout'\n  : (parsed.outcome || 'No Answer');\n\nreturn [{\n  json: {\n    ...lead,\n    final_outcome: outcome,\n    follow_up_date: parsed.follow_up_date || '',\n    meeting_booked: parsed.meeting_booked || false,\n    short_summary: parsed.short_summary || lead.call_summary\n  }\n}];"
+      },
+      "id": "n16-finalize",
+      "name": "Finalize Outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3080, 400]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": { "__rl": true, "value": "YOUR_SHEET_ID_HERE", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Leads", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": ["Business Name", "Phone"],
+          "value": {
+            "Business Name": "={{ $json['Business Name'] }}",
+            "Phone": "={{ $json.Phone }}",
+            "Call Status": "={{ $json.final_outcome }}",
+            "Last Called At": "={{ $now.toISO() }}",
+            "Follow Up Date": "={{ $json.follow_up_date }}",
+            "Outcome Summary": "={{ $json.short_summary }}",
+            "Transcript": "={{ $json.call_transcript }}",
+            "Meeting Booked": "={{ $json.meeting_booked }}",
+            "Attempt Count": "={{ (Number($json['Attempt Count']) || 0) + 1 }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "n17-update",
+      "name": "Update Lead in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [3300, 400]
+    },
+    {
+      "parameters": { "amount": 15, "unit": "minutes" },
+      "id": "n18-wait15",
+      "name": "Wait 15 Minutes",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [3520, 400]
+    }
+  ],
+  "connections": {
+    "Start Run (click here)": { "main": [[{ "node": "Get All Leads", "type": "main", "index": 0 }]] },
+    "Get All Leads": { "main": [[{ "node": "Pick Next Eligible Lead", "type": "main", "index": 0 }]] },
+    "Pick Next Eligible Lead": { "main": [[{ "node": "Route: Lead / Outside Hours / Empty", "type": "main", "index": 0 }]] },
+    "Route: Lead / Outside Hours / Empty": {
+      "main": [
+        [{ "node": "Search Competitor", "type": "main", "index": 0 }],
+        [{ "node": "Wait For Calling Hours (30 min)", "type": "main", "index": 0 }],
+        [{ "node": "No More Leads - Stop", "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait For Calling Hours (30 min)": { "main": [[{ "node": "Get All Leads", "type": "main", "index": 0 }]] },
+    "Search Competitor": { "main": [[{ "node": "Extract Competitor Info", "type": "main", "index": 0 }]] },
+    "Extract Competitor Info": { "main": [[{ "node": "Generate Tailored Opener", "type": "main", "index": 0 }]] },
+    "Generate Tailored Opener": { "main": [[{ "node": "Merge Opener Into Lead", "type": "main", "index": 0 }]] },
+    "Merge Opener Into Lead": { "main": [[{ "node": "Place Call (Vapi)", "type": "main", "index": 0 }]] },
+    "Place Call (Vapi)": { "main": [[{ "node": "Save Call ID", "type": "main", "index": 0 }]] },
+    "Save Call ID": { "main": [[{ "node": "Wait 30s", "type": "main", "index": 0 }]] },
+    "Wait 30s": { "main": [[{ "node": "Check Call Status", "type": "main", "index": 0 }]] },
+    "Check Call Status": { "main": [[{ "node": "Merge Call Data", "type": "main", "index": 0 }]] },
+    "Merge Call Data": { "main": [[{ "node": "Call Ended OR Timed Out?", "type": "main", "index": 0 }]] },
+    "Call Ended OR Timed Out?": {
+      "main": [
+        [{ "node": "Classify Outcome", "type": "main", "index": 0 }],
+        [{ "node": "Wait 30s", "type": "main", "index": 0 }]
+      ]
+    },
+    "Classify Outcome": { "main": [[{ "node": "Finalize Outcome", "type": "main", "index": 0 }]] },
+    "Finalize Outcome": { "main": [[{ "node": "Update Lead in Sheet", "type": "main", "index": 0 }]] },
+    "Update Lead in Sheet": { "main": [[{ "node": "Wait 15 Minutes", "type": "main", "index": 0 }]] },
+    "Wait 15 Minutes": { "main": [[{ "node": "Get All Leads", "type": "main", "index": 0 }]] }
+  }
+}

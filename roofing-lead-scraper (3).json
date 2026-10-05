@@ -1,0 +1,124 @@
+{
+  "name": "Roofing Lead Scraper - Google Maps",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## HOW TO RUN THIS\n\nRuns SEPARATELY from the Master Orchestrator, in batches, whenever you want to top up your lead list.\n\n1. Fill Apify API token (search 'YOUR_APIFY_API_TOKEN_HERE')\n2. Fill your Sheet ID (search 'YOUR_SHEET_ID_HERE')\n3. Edit the 'Target Cities' node - list whatever US cities you want to scrape\n4. Click 'Start Scrape'\n5. Apify's free plan gives monthly usage credit with no card required to start - watch your usage on apify.com if you scale up city count\n\nThis ONLY appends leads with no website. Anything that already has a website gets filtered out before it ever reaches your Sheet.\n\nNew rows land with Call Status EMPTY - which is exactly what the Master Orchestrator looks for as 'new, never called'.",
+        "height": 380,
+        "width": 400
+      },
+      "id": "s0-note",
+      "name": "READ ME FIRST",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-260, 0]
+    },
+    {
+      "parameters": {},
+      "id": "s1-start",
+      "name": "Start Scrape",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Edit this list - one city per line, \"Roofing City, ST\" format works well as a search term\nconst cities = [\n  'Roofing companies in Columbus, OH',\n  'Roofing companies in Tulsa, OK',\n  'Roofing companies in Greenville, SC'\n];\n\nreturn cities.map(c => ({ json: { searchTerm: c } }));"
+      },
+      "id": "s2-cities",
+      "name": "Target Cities",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/compass~crawler-google-places/run-sync-get-dataset-items",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "token", "value": "YOUR_APIFY_API_TOKEN_HERE" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"searchStringsArray\": [\"{{ $json.searchTerm }}\"],\n  \"maxCrawledPlacesPerSearch\": 40,\n  \"language\": \"en\",\n  \"skipClosedPlaces\": true,\n  \"memoryMbytes\": 1024\n}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "s3-apify",
+      "name": "Run Apify Google Maps Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Apify's response can arrive two different ways depending on n8n's HTTP Request\n// settings: either as ONE item containing the whole array, or auto-split into\n// MANY items (one per business). Handle both so this never silently returns nothing.\n\nlet places;\n\nif (items.length > 1) {\n  // n8n already split the array into one item per place\n  places = items.map(i => i.json);\n} else {\n  const first = items[0] ? items[0].json : null;\n  if (Array.isArray(first)) {\n    places = first;\n  } else if (first && Array.isArray(first.items)) {\n    places = first.items;\n  } else if (first) {\n    places = [first];\n  } else {\n    places = [];\n  }\n}\n\nconst noWebsite = places.filter(p => !p.website || p.website.trim() === '');\n\nreturn noWebsite.map(p => ({\n  json: {\n    'Business Name': p.title || '',\n    'Phone': p.phone || p.phoneUnformatted || '',\n    'City': p.city || p.address || '',\n    'State': p.state || (p.address ? (p.address.match(/,\\s*([A-Z]{2})\\s*\\d{5}/) || [])[1] || '' : ''),\n    'Rating': p.totalScore || '',\n    'Review Count': p.reviewsCount || 0,\n    'Website': 'N',\n    'Call Status': '',\n    'Last Called At': '',\n    'Follow Up Date': '',\n    'Outcome Summary': '',\n    'Transcript': '',\n    'Meeting Booked': false,\n    'Attempt Count': 0\n  }\n}));"
+      },
+      "id": "s4-filter",
+      "name": "Filter - No Website Only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Drop rows with no usable phone number - can't cold call without one\nreturn items.filter(i => i.json.Phone && i.json.Phone.trim() !== '');"
+      },
+      "id": "s5-hasphone",
+      "name": "Drop Rows Without Phone",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": { "__rl": true, "value": "YOUR_SHEET_ID_HERE", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Leads", "mode": "name" },
+        "options": {}
+      },
+      "id": "s6-existing",
+      "name": "Get Existing Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [880, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// De-dupe against what's already in the Sheet, matching on Business Name + Phone\nconst newLeads = $('Drop Rows Without Phone').all().map(i => i.json);\nconst existing = $input.all().map(i => i.json);\n\nconst existingKeys = new Set(existing.map(e => (e['Business Name'] || '') + '|' + (e['Phone'] || '')));\n\nconst deduped = newLeads.filter(l => !existingKeys.has(l['Business Name'] + '|' + l['Phone']));\n\nreturn deduped.map(l => ({ json: l }));"
+      },
+      "id": "s7-dedupe",
+      "name": "De-Dupe Against Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_SHEET_ID_HERE", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Leads", "mode": "name" },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "s8-append",
+      "name": "Append New Leads to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1320, 400]
+    }
+  ],
+  "connections": {
+    "Start Scrape": { "main": [[{ "node": "Target Cities", "type": "main", "index": 0 }]] },
+    "Target Cities": { "main": [[{ "node": "Run Apify Google Maps Scraper", "type": "main", "index": 0 }]] },
+    "Run Apify Google Maps Scraper": { "main": [[{ "node": "Filter - No Website Only", "type": "main", "index": 0 }]] },
+    "Filter - No Website Only": { "main": [[{ "node": "Drop Rows Without Phone", "type": "main", "index": 0 }]] },
+    "Drop Rows Without Phone": { "main": [[{ "node": "Get Existing Leads", "type": "main", "index": 0 }]] },
+    "Get Existing Leads": { "main": [[{ "node": "De-Dupe Against Sheet", "type": "main", "index": 0 }]] },
+    "De-Dupe Against Sheet": { "main": [[{ "node": "Append New Leads to Sheet", "type": "main", "index": 0 }]] }
+  }
+}
